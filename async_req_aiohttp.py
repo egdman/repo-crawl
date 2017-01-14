@@ -4,8 +4,11 @@ import asyncio
 import aiohttp
 import re
 import os.path
+import logging
+import random
 from functools import partial
 from time import sleep
+
 
 from tests.github_mock import get_free_port, start_mock_server
 
@@ -31,6 +34,9 @@ start_urls = [
 ]
 
 start_urls = list(url + '/contributors' for url in start_urls)
+
+
+
 
 
 def setup_mock():
@@ -61,83 +67,134 @@ async def print_stuff():
 
 
 
-async def fetch(url, session):
-    
-    if access_token is not None:
-        url_with_token = url + "?access_token={}".format(access_token)
-    else:
-        url_with_token = url
+class GithubCrawler(object):
 
-    async with session.get(url_with_token) as resp:
+    def __init__(self, start_urls, access_token=None):
 
-        status_code = resp.status
-        limit = resp.headers['X-RateLimit-Remaining']
-        resp_data = json.loads(await resp.text())
-
-        print("got status {} from {}".format(status_code, url))
+        self.logger = logging.getLogger(__name__)
         
-    # with open('res.json', 'w') as resfile:
-        # json.dump(resp_data, resfile, indent=4)
+        self.url_queue = asyncio.Queue()
+        for url in start_urls: self.url_queue.put_nowait(url)
 
-        # print("{} contributors".format(len(resp_data)))
-        # print("requests remaining : {}".format(limit))
-        # print('thread : {}'.format(resp.headers['Thread-Name']))
-        return resp_data, limit
+        self.access_token = access_token
 
+        self.repo_contribs_ptrn = re.compile(r'\/repos\/(.*)\/(.*)\/contributors\/?')
+        self.user_repos_ptrn = re.compile(r'\/users\/(.*)\/repos\/?')
 
-
-
-
-
-async def run(loop, urls):
-    async with aiohttp.ClientSession(loop=loop) as session:
-        # for url in urls: await fetch(url, session)
-
-        tasks = list(asyncio.ensure_future(fetch(url, session)) for url in urls)
-        # for task in tasks: task.add_done_callback()
-        retv = await asyncio.wait(tasks)
-
-        results = list(fin_task.result() for fin_task in retv[0])
-        for (data, limit) in results:
-            print("{} contributors".format(len(data)))
-            print("requests remaining : {}".format(limit))
+        self.rate_of_req = 0.
+        self.target_rate = 1.  # do this many requests per second
 
 
+
+    async def fetch(self, url, session):
+
+        if self.access_token is not None:
+            url_with_token = url + "?access_token={}".format(self.access_token)
+        else:
+            url_with_token = url
+
+        async with session.get(url_with_token) as resp:
+
+            status_code = resp.status
+            resp_string = await resp.text()
+
+            try:
+                resp_data = json.loads(resp_string)
+            except json.decoder.JSONDecodeError as ex:
+                self.logger.info("JSON could not decode the following text:\n{}".format(resp_string))
+                resp_data = []
+
+
+            if status_code != 200:
+                report = "got status {} from {}\n".format(status_code, url)
+                
+                for header in resp.headers:
+                    report += "{} : {}\n".format(header, resp.headers[header])
+
+                report += "BEGIN_BODY\n"
+                report += resp_string + '\n'
+                report += "END_BODY\n"
+
+                self.logger.info(report)
+                return resp_data, 0
+
+
+            if 'X-RateLimit-Remaining' not in resp.headers:
+                self.logger.info("x-ratelimit-remaining not in headers, url: {}".format(url))
+                return resp_data, 0
+
+            limit = resp.headers['X-RateLimit-Remaining']
+
+            # print("got status {} from {}".format(status_code, url))
+
+            return resp_data, limit
+
+
+
+    def schedule_request(self, url, session):
+        contribs_match = re.search(self.repo_contribs_ptrn, url)
+        repos_match = re.search(self.user_repos_ptrn, url)
+
+        fut = asyncio.ensure_future(self.fetch(url, session))
+
+        # add appropriate callback
+        if contribs_match:
+            fut.add_done_callback(self.process_repo_contribs)
+        elif repos_match:
+            fut.add_done_callback(self.process_user_repos)
+
+
+
+
+    async def run(self, loop):
+
+        async with aiohttp.ClientSession(loop=loop) as session:
+            while True:
+
+                url = await self.url_queue.get()
+                self.schedule_request(url, session)
+
+                # TODO add some code to handle throttling
+
+
+
+    def process_repo_contribs(self, future):
+        json_data, limit = future.result() 
+        contrib_repos_urls = list(json_obj['repos_url'] for json_obj in json_data)
+        contrib_logins = list(json_obj['login'] for json_obj in json_data)
+        print("{} contributors".format(len(json_data)))
+        print("limit: {}".format(limit))
+        print("::::::::::::::::::::::::::::::::::::::::")
+        for url in contrib_repos_urls: self.url_queue.put_nowait(url)
+
+
+    def process_user_repos(self, future):
+        json_data, limit = future.result() 
+        repo_contribs_urls = list(json_obj['contributors_url'] for json_obj in json_data)
+        repo_urls = list(json_obj['url'] for json_obj in json_data)
+
+        print("{} repos".format(len(json_data)))
+        print("limit: {}".format(limit))
+        print("++++++++++++++++++++++++++++++++++++++++")
+        for url in repo_contribs_urls: self.url_queue.put_nowait(url)
 
 
 def main():
+
+    logging.basicConfig(
+        filename = 'readem_crawler.log',
+        level = logging.INFO,
+        format='%(levelname)s:%(message)s')
+
     # Setup fake server on localhost
-    # start_urls = setup_mock()
+    start_urls = setup_mock()
 
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run(loop, start_urls))
+    # loop.run_until_complete(run(loop, start_urls))
+
+    crawler = GithubCrawler(start_urls, access_token=access_token)
+    loop.run_until_complete(crawler.run(loop))
 
 
 if __name__ == '__main__':
     main()
-
-
-
-# print(asyncio.get_event_loop_policy())
-
-
-# def get_repos(init_repo_url, max_num_repos):
-#   explored_repos = set()
-#   new_repos = deque([init_repo_url])
-
-#   explored_users = set()
-
-#   while len(explored_repos) < max_num_repos:
-#       if len(new_repos) == 0:
-#           print("FINISHED EARLY")
-#           break
-
-#       repo_url = new_repos.popleft()
-#       explored_repos.append(repo_url)
-
-#       print(" explored repos: {}".format(len(explored_repos)))
-#       print("total number of repos: {}".format(len(new_repos) + len(explored_repos)))
-
-
-
-

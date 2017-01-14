@@ -19,9 +19,9 @@ class MockServerRequestHandler(BaseHTTPRequestHandler):
         
         result = re.search(self.CONTRIBUTORS_PTRN, self.path)
 
-        if result:
+        sleep(2. + .5*random.random())
 
-            sleep(2. + 2.*random.random())
+        if result:
 
             user_name = result.group(1)
             repo_name = result.group(2)
@@ -32,22 +32,33 @@ class MockServerRequestHandler(BaseHTTPRequestHandler):
             # Add response headers.
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('X-RateLimit-Remaining', 5000)
-            self.send_header('Thread-Name', currentThread().getName())
             self.end_headers()
 
             # Add response content.
             response_content = json.dumps(self.fake_data(repo_name))
 
             self.wfile.write(response_content.encode('utf-8'))
-            return     
+            return
+
+        else:
+            self.send_response(404)
+
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('X-RateLimit-Remaining', 5000)
+            self.end_headers()
+
+            self.wfile.write(''.encode('utf-8'))
+            return
+
 
 
 
     def fake_data(self, repo_name):
+        (host, port) = self.server.server_address
         contr_names = list(repo_name + "_contrib{}".format(cnum) for cnum in range(4))
         return list({
                 'login': contr_name,
-                'repos_url': 'https://api.github.com/users/{}/repos'.format(contr_name),
+                'repos_url': 'http://{}:{}/users/{}/repos'.format(host, port, contr_name),
             } for contr_name in contr_names)
 
 
