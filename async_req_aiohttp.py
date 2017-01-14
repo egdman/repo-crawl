@@ -37,6 +37,34 @@ start_urls = list(url + '/contributors' for url in start_urls)
 
 
 
+class CrawlError(Exception): pass
+
+
+class BadServerResponse(CrawlError):
+    def __init__(self, message, resp_headers, resp_body):
+        self.message = message
+        self.resp_headers = resp_headers
+        self.resp_body = resp_body
+
+    def report(self):
+        report = self.message + '\n'
+                
+        for header in self.resp_headers:
+            report += "{} : {}\n".format(header, self.resp_headers[header])
+
+        report += "BEGIN_BODY\n"
+        report += self.resp_body + '\n'
+        report += "END_BODY\n"
+        return report
+
+
+class ParseError(CrawlError):
+    def __init__(self, message):
+        self.message = message
+
+    def report(self):
+        return self.message
+
 
 
 def setup_mock():
@@ -70,8 +98,6 @@ async def print_stuff():
 class GithubCrawler(object):
 
     def __init__(self, start_urls, access_token=None):
-
-        self.logger = logging.getLogger(__name__)
         
         self.url_queue = asyncio.Queue()
         for url in start_urls: self.url_queue.put_nowait(url)
@@ -96,38 +122,43 @@ class GithubCrawler(object):
         async with session.get(url_with_token) as resp:
 
             status_code = resp.status
-            resp_string = await resp.text()
+            resp_body = await resp.text()
 
+            resp_data = []
+
+            # try to decode JSON response
             try:
-                resp_data = json.loads(resp_string)
+                resp_data = json.loads(resp_body)
             except json.decoder.JSONDecodeError as ex:
-                self.logger.info("JSON could not decode the following text:\n{}".format(resp_string))
+                logging.info(
+                    ParseError(
+                        message="JSON could not decode the following text:\n{}".format(resp_body)
+                    ).report()
+                )
+            
+            if status_code != 200:
+                logging.info(BadServerResponse(
+                    message = "got status {} from {}".format(status_code, url),
+                    resp_headers = resp.headers,
+                    resp_body = resp_body).report())
+
+                # if code is not 200, the decoded JSON will be wrong, so we ditch it
                 resp_data = []
 
-
-            if status_code != 200:
-                report = "got status {} from {}\n".format(status_code, url)
-                
-                for header in resp.headers:
-                    report += "{} : {}\n".format(header, resp.headers[header])
-
-                report += "BEGIN_BODY\n"
-                report += resp_string + '\n'
-                report += "END_BODY\n"
-
-                self.logger.info(report)
-                return resp_data, 0
-
-
+            # we need this header to know how many requests left
+            # if it's not there, raise error
             if 'X-RateLimit-Remaining' not in resp.headers:
-                self.logger.info("x-ratelimit-remaining not in headers, url: {}".format(url))
-                return resp_data, 0
+
+                raise BadServerResponse(
+                    message = "x-ratelimit-remaining not in headers, url: {}".format(url),
+                    resp_headers = resp.headers,
+                    resp_body = resp_body)
 
             limit = resp.headers['X-RateLimit-Remaining']
 
-            # print("got status {} from {}".format(status_code, url))
-
             return resp_data, limit
+
+            
 
 
 
@@ -179,17 +210,34 @@ class GithubCrawler(object):
         for url in repo_contribs_urls: self.url_queue.put_nowait(url)
 
 
+
+
+
+def except_handler(loop, context, logger):
+    ex = context['exception']
+    if isinstance(ex, CrawlError):
+        logger.info(ex.report())
+    else:
+        raise ex
+
+
+
+
 def main():
+    # Setup fake server on localhost
+    start_urls = setup_mock()
+
 
     logging.basicConfig(
         filename = 'readem_crawler.log',
         level = logging.INFO,
         format='%(levelname)s:%(message)s')
 
-    # Setup fake server on localhost
-    start_urls = setup_mock()
+    logger = logging.getLogger(__name__)
+
 
     loop = asyncio.get_event_loop()
+    loop.set_exception_handler(partial(except_handler, logger=logger))
     # loop.run_until_complete(run(loop, start_urls))
 
     crawler = GithubCrawler(start_urls, access_token=access_token)
