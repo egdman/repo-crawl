@@ -7,7 +7,7 @@ import os.path
 import logging
 import random
 from functools import partial
-from time import sleep
+from time import sleep, time
 
 
 from tests.github_mock import get_free_port, start_mock_server
@@ -97,18 +97,18 @@ async def print_stuff():
 
 class GithubCrawler(object):
 
-    def __init__(self, start_urls, access_token=None):
+    def __init__(self, start_urls, access_token=None, rate_of_requests = 1.):
         
         self.url_queue = asyncio.Queue()
         for url in start_urls: self.url_queue.put_nowait(url)
 
         self.access_token = access_token
 
-        self.repo_contribs_ptrn = re.compile(r'\/repos\/(.*)\/(.*)\/contributors\/?')
-        self.user_repos_ptrn = re.compile(r'\/users\/(.*)\/repos\/?')
+        self.repo_contribs_ptrn = re.compile(r'\/+repos\/+(.*?)\/+(.*?)\/+contributors\/?')
+        self.user_repos_ptrn = re.compile(r'\/+users\/+(.*?)\/+repos\/?')
 
-        self.rate_of_req = 0.
-        self.target_rate = 1.  # do this many requests per second
+        self.target_rate_of_req = rate_of_requests
+        self.last_resp_time = time()
 
 
 
@@ -169,10 +169,13 @@ class GithubCrawler(object):
         fut = asyncio.ensure_future(self.fetch(url, session))
 
         # add appropriate callback
+
         if contribs_match:
-            fut.add_done_callback(self.process_repo_contribs)
+            cback = partial(self.handle_response, handler=self.process_repo_contribs)
         elif repos_match:
-            fut.add_done_callback(self.process_user_repos)
+            cback = partial(self.handle_response, handler=self.process_user_repos)
+
+        fut.add_done_callback(cback)
 
 
 
@@ -182,10 +185,20 @@ class GithubCrawler(object):
         async with aiohttp.ClientSession(loop=loop) as session:
             while True:
 
+                await asyncio.sleep(1. / self.target_rate_of_req)
                 url = await self.url_queue.get()
                 self.schedule_request(url, session)
 
-                # TODO add some code to handle throttling
+
+
+    def handle_response(self, future, handler):
+        time_since_last = time() - self.last_resp_time
+        self.last_resp_time = time()
+        print("dT = " + str(time_since_last))
+        try:
+            handler(future)
+        except KeyError as exc:
+            logging.info("Got error when parsing response: key {} not found.".format(exc))
 
 
 
@@ -238,7 +251,6 @@ def main():
 
     loop = asyncio.get_event_loop()
     loop.set_exception_handler(partial(except_handler, logger=logger))
-    # loop.run_until_complete(run(loop, start_urls))
 
     crawler = GithubCrawler(start_urls, access_token=access_token)
     loop.run_until_complete(crawler.run(loop))

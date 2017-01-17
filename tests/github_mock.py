@@ -13,18 +13,20 @@ from socketserver import ThreadingMixIn
 
 class MockServerRequestHandler(BaseHTTPRequestHandler):
 
-    CONTRIBUTORS_PTRN = re.compile(r'repos\/(.*)\/(.*)\/contributors\/?')
+    REPO_CONTRIBS_PTRN = re.compile(r'\/+repos\/+(.*?)\/+(.*?)\/+contributors\/?')
+    USER_REPOS_PTRN = re.compile(r'\/+users\/+(.*?)\/+repos\/?')
 
     def do_GET(self):
         
-        result = re.search(self.CONTRIBUTORS_PTRN, self.path)
+        contribs_match = re.search(self.REPO_CONTRIBS_PTRN, self.path)
+        repos_match = re.search(self.USER_REPOS_PTRN, self.path)
 
         sleep(2. + .5*random.random())
 
-        if result:
+        if contribs_match:
 
-            user_name = result.group(1)
-            repo_name = result.group(2)
+            user_name = contribs_match.group(1)
+            repo_name = contribs_match.group(2)
 
             # Add response status code.
             self.send_response(requests.codes.ok)
@@ -35,8 +37,23 @@ class MockServerRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             # Add response content.
-            response_content = json.dumps(self.fake_data(repo_name))
+            response_content = json.dumps(self.fake_contribs(repo_name))
 
+            self.wfile.write(response_content.encode('utf-8'))
+            return
+
+        elif repos_match:
+
+            user_name = repos_match.group(1)
+
+            self.send_response(requests.codes.ok)
+
+            # Add response headers
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('X-RateLimit-Remaining', 5000)
+            self.end_headers()
+
+            response_content = json.dumps(self.fake_repos(user_name))
             self.wfile.write(response_content.encode('utf-8'))
             return
 
@@ -52,13 +69,35 @@ class MockServerRequestHandler(BaseHTTPRequestHandler):
 
 
 
-
-    def fake_data(self, repo_name):
+    def fake_repos(self, user_name):
         (host, port) = self.server.server_address
-        contr_names = list(repo_name + "_contrib{}".format(cnum) for cnum in range(4))
+        domain = 'http://{}:{}'.format(host, port)
+
+        repo_names = list(user_name + "_repo{}".format(rnum) for rnum in range(2))
+
+        data = []
+        for repo_name in repo_names:
+
+            full_name = '{}/{}'.format(user_name, repo_name)
+            full_url = '{}/repos/{}'.format(domain, full_name)
+            data.append({
+                'name': repo_name,
+                'full_name': full_name,
+                'url': full_url,
+                'contributors_url': '{}/contributors'.format(full_url),
+            })
+
+        return data
+        
+
+
+    def fake_contribs(self, repo_name):
+        (host, port) = self.server.server_address
+        domain = 'http://{}:{}'.format(host, port)
+        contr_names = list(repo_name + "_contrib{}".format(cnum) for cnum in range(2))
         return list({
                 'login': contr_name,
-                'repos_url': 'http://{}:{}/users/{}/repos'.format(host, port, contr_name),
+                'repos_url': '{}/users/{}/repos'.format(domain, contr_name),
             } for contr_name in contr_names)
 
 
